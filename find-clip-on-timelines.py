@@ -281,7 +281,7 @@ layout = ui.VGroup(
 win = dispatcher.AddWindow(
     {
         'ID': winID,
-        'WindowTitle': 'Find Clip Usage',
+        'WindowTitle': 'Find Clip on Timelines',
         'Events': {'Close': True},
         'FixedSize': (450, 400)
     },
