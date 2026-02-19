@@ -2,7 +2,7 @@
 
 > Part of [PostFlows](https://github.com/postflows) toolkit for DaVinci Resolve
 
-Search for a clip across all timelines and optionally highlight its instances with a chosen clip color.
+Search for a clip across all timelines and optionally highlight its instances with a chosen clip color. **Lua** script (canonical version).
 
 ## What it does
 
@@ -15,10 +15,12 @@ Uses currently selected clip in Media Pool (or manual refresh). Searches all pro
 
 ## Installation
 
-Copy the script to:
+Copy the **`find-clip-on-timelines.lua`** file to:
 
 - **macOS:** `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/`
 - **Windows:** `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\`
+
+Run from **Workspace → Scripts** in Resolve (or from the Fusion page Scripts menu).
 
 ## Usage
 
