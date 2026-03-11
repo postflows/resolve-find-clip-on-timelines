@@ -10,7 +10,7 @@ Uses currently selected clip in Media Pool (or manual refresh). Searches all pro
 
 ## Requirements
 
-- DaVinci Resolve 18+
+- DaVinci Resolve 20+ (Studio Version)
 - Open project
 
 ## Installation
