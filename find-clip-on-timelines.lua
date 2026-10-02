@@ -8,6 +8,17 @@
 -- Includes clip highlighting with color selection and instance counts per timeline.
 -- Based on original script by Daniel F. Urdiales, modified by Sergey Knyazkov (2024).
 --
+-- Patch notes (this revision):
+--  1. Fixed tree bug: SetData(0, "DisplayRole", idx) was overwriting the
+--     displayed timeline name with its numeric index. Timeline/instance
+--     identity is now stored in "UserRole" instead, so names show correctly.
+--  2. Double-clicking a timeline still just switches to it (as before).
+--     Double-clicking a specific clip instance now ALSO moves the playhead
+--     to that instance's start frame via Timeline:SetCurrentTimecode().
+--  3. The tree is now two levels: timeline (parent) -> clip instances
+--     (children), each instance showing track type/index and start timecode,
+--     so multiple fragments on the same timeline are individually navigable.
+--
 -- MIT License
 -- Copyright (c) 2024 Daniel F. Urdiales
 
@@ -181,6 +192,22 @@ local currentClipId = nil
 local defaultClipName = ""
 local foundClips = {}
 
+-- Converts an absolute timeline frame number to an "HH:MM:SS:FF" timecode
+-- string using non-drop-frame math. Good enough to land the playhead on a
+-- clip; for 29.97/59.94 drop-frame timelines this can drift by a frame or
+-- two over very long durations, but is accurate for navigation purposes.
+local function framesToTimecode(frames, fps)
+    local roundedFps = math.floor(fps + 0.5)
+    if roundedFps <= 0 then roundedFps = 25 end
+    frames = math.floor(frames + 0.5)
+    local totalSeconds = math.floor(frames / roundedFps)
+    local ff = frames % roundedFps
+    local hh = math.floor(totalSeconds / 3600)
+    local mm = math.floor((totalSeconds % 3600) / 60)
+    local ss = totalSeconds % 60
+    return string.format("%02d:%02d:%02d:%02d", hh, mm, ss, ff)
+end
+
 -- Check selected clip in Media Pool
 local selectedClips = mediaPool:GetSelectedClips()
 if selectedClips and #selectedClips > 0 then
@@ -265,9 +292,9 @@ local layout = ui:VGroup(
                 ui:Tree({
                     ID = treeID,
                     AlternatingRowColors = true,
-                    RootIsDecorated = false,
-                    SortingEnabled = true,
-                    ToolTip = "Double click timeline to open.",
+                    RootIsDecorated = true,
+                    SortingEnabled = false,
+                    ToolTip = "Double click a timeline to open it, or a clip row to jump straight to that instance.",
                     Events = {ItemDoubleClicked = true}
                 })
             }
@@ -296,11 +323,11 @@ local function initTree()
     local tree = winItems[treeID]
     tree.ColumnCount = 2
     local hdr = tree:NewItem()
-    hdr.Text[0] = "Timeline Name"
-    hdr.Text[1] = "Clip Count"
+    hdr.Text[0] = "Timeline / Clip"
+    hdr.Text[1] = "Details"
     tree:SetHeaderItem(hdr)
-    tree.ColumnWidth[0] = 300
-    tree.ColumnWidth[1] = 120
+    tree.ColumnWidth[0] = 280
+    tree.ColumnWidth[1] = 140
 end
 
 local function initComboBox()
@@ -427,6 +454,38 @@ local function searchTimeline(timelineObj, clipId, collectClips)
     end
 end
 
+-- Encodes navigation data into a single string stored in the tree item's
+-- UserRole, since only "DisplayRole" is safe to overwrite Text with.
+-- Timeline-only rows store just the timeline index; clip-instance rows
+-- also carry the clip's start frame, e.g. "3" or "3|86412".
+local function encodeNavData(timelineIndex, startFrame)
+    if startFrame then
+        return string.format("%d|%d", timelineIndex, startFrame)
+    end
+    return tostring(timelineIndex)
+end
+
+local function decodeNavData(raw)
+    if not raw then return nil, nil end
+    local parts = {}
+    for part in string.gmatch(tostring(raw), "[^|]+") do
+        table.insert(parts, part)
+    end
+    local timelineIndex = tonumber(parts[1])
+    local startFrame = parts[2] and tonumber(parts[2]) or nil
+    return timelineIndex, startFrame
+end
+
+local function trackTypeLabel(trackType, trackIndex)
+    if trackType == "video" then
+        return string.format("Video, Track %d", trackIndex)
+    elseif trackType == "audio" then
+        return string.format("Audio, Track %d", trackIndex)
+    else
+        return string.format("Video+Audio, Track %d", trackIndex)
+    end
+end
+
 local function onFind(ev)
     if not currentClipId then
         winItems[statID].Text = "No clip selected or clip ID is invalid."
@@ -444,35 +503,54 @@ local function onFind(ev)
     end
 
     local totalClipsFound = 0
+    local timelinesFound = 0
+
     for idx = 1, totalTimelines do
         winItems[statID].Text = string.format("Searching %d/%d Timelines.", idx, totalTimelines)
         local timelineObj = project:GetTimelineByIndex(idx)
-        local found, counts, _ = searchTimeline(timelineObj, currentClipId, false)
+        local found, counts, clips = searchTimeline(timelineObj, currentClipId, true)
 
         if found then
-            local item = winItems[treeID]:NewItem()
-            item.Text[0] = timelineObj:GetName()
-            item.Text[1] = string.format("V:%d A:%d L:%d", counts.video, counts.audio, counts.linked)
-            item:SetData(0, "DisplayRole", idx)
-            winItems[treeID]:AddTopLevelItem(item)
+            timelinesFound = timelinesFound + 1
+
+            local fpsOk, fps = pcall(function() return tonumber(timelineObj:GetSetting("timelineFrameRate")) end)
+            if not fpsOk or not fps then fps = 25 end
+
+            local parentItem = winItems[treeID]:NewItem()
+            parentItem.Text[0] = timelineObj:GetName()
+            parentItem.Text[1] = string.format("V:%d A:%d L:%d", counts.video, counts.audio, counts.linked)
+            parentItem:SetData(0, "UserRole", encodeNavData(idx))
+            winItems[treeID]:AddTopLevelItem(parentItem)
+
+            for _, clipInfo in ipairs(clips) do
+                local startFrame = clipInfo.clip:GetStart()
+                local childItem = winItems[treeID]:NewItem()
+                childItem.Text[0] = "    " .. trackTypeLabel(clipInfo.track_type, clipInfo.track_index)
+                childItem.Text[1] = framesToTimecode(startFrame, fps)
+                childItem:SetData(0, "UserRole", encodeNavData(idx, startFrame))
+                parentItem:AddChild(childItem)
+            end
+
+            parentItem.Expanded = true
+            foundClips[idx] = clips
             totalClipsFound = totalClipsFound + counts.video + counts.audio + counts.linked
         end
     end
 
-    local topCount = winItems[treeID]:TopLevelItemCount()
-    winItems[statID].Text = string.format("Clip was found on %d Timelines. Total instances: %d.", topCount, totalClipsFound)
+    winItems[statID].Text = string.format("Clip was found on %d Timelines. Total instances: %d.", timelinesFound, totalClipsFound)
 end
 
 local function onHighlight(ev)
     local selectedItem = winItems[treeID]:CurrentItem()
     if not selectedItem then
-        winItems[statID].Text = "Select a timeline to highlight clips."
+        winItems[statID].Text = "Select a timeline or a clip row to highlight."
         return
     end
 
-    local timelineIndex = selectedItem:GetData(0, "DisplayRole")
+    local raw = selectedItem:GetData(0, "UserRole")
+    local timelineIndex, startFrame = decodeNavData(raw)
     if not timelineIndex then
-        winItems[statID].Text = "Invalid timeline selected."
+        winItems[statID].Text = "Invalid selection."
         return
     end
 
@@ -486,6 +564,18 @@ local function onHighlight(ev)
     if not clips or #clips == 0 then
         winItems[statID].Text = "No clips found in selected timeline."
         return
+    end
+
+    -- If a specific instance row was selected (has a start frame), only
+    -- highlight that one instance instead of every instance on the timeline.
+    if startFrame then
+        local filtered = {}
+        for _, clipInfo in ipairs(clips) do
+            if clipInfo.clip:GetStart() == startFrame then
+                table.insert(filtered, clipInfo)
+            end
+        end
+        clips = filtered
     end
 
     local color = winItems[colorID].CurrentText
@@ -505,7 +595,7 @@ local function onHighlight(ev)
     end
 
     foundClips[timelineIndex] = clips
-    winItems[statID].Text = string.format("Highlighted %d/%d clips in %s with %s.", successCount, #clips, selectedItem.Text[0], color)
+    winItems[statID].Text = string.format("Highlighted %d/%d clip(s) in %s with %s.", successCount, #clips, timelineObj:GetName(), color)
 end
 
 local function onColorChanged(ev)
@@ -532,10 +622,16 @@ local function refreshClip(ev)
     end
 end
 
-local function setTimeline(ev)
+-- Handles double-clicks on both timeline rows and clip-instance rows.
+-- Timeline rows: just switches the active timeline (as before).
+-- Clip-instance rows: switches the timeline AND parks the playhead on
+-- that specific instance's start frame.
+local function navigateToItem(ev)
     local item = ev and ev.item
     if not item then return end
-    local timelineIndex = item:GetData(0, "DisplayRole")
+
+    local raw = item:GetData(0, "UserRole")
+    local timelineIndex, startFrame = decodeNavData(raw)
     if not timelineIndex then return end
 
     local tl = project:GetTimelineByIndex(timelineIndex)
@@ -543,18 +639,30 @@ local function setTimeline(ev)
         winItems[statID].Text = "Error: Timeline not found."
         return
     end
+
     local ok, err = pcall(function()
         local currentPage = resolve:GetCurrentPage()
         if currentPage == "media" or currentPage == "fusion" then
             resolve:OpenPage("edit")
         end
         project:SetCurrentTimeline(tl)
+        if startFrame then
+            local fpsOk, fps = pcall(function() return tonumber(tl:GetSetting("timelineFrameRate")) end)
+            if not fpsOk or not fps then fps = 25 end
+            local tc = framesToTimecode(startFrame, fps)
+            tl:SetCurrentTimecode(tc)
+        end
     end)
+
     if not ok then
-        print("Error: Cannot set timeline at index " .. tostring(timelineIndex) .. ": " .. tostring(err))
-        winItems[statID].Text = "Error: Cannot open selected timeline."
+        print("Error: Cannot navigate to timeline index " .. tostring(timelineIndex) .. ": " .. tostring(err))
+        winItems[statID].Text = "Error: Cannot open selected timeline/clip."
     else
-        winItems[statID].Text = "Switched to timeline: " .. (tl:GetName() or "?")
+        if startFrame then
+            winItems[statID].Text = "Jumped to clip on: " .. (tl:GetName() or "?")
+        else
+            winItems[statID].Text = "Switched to timeline: " .. (tl:GetName() or "?")
+        end
     end
 end
 
@@ -563,7 +671,7 @@ local function onClose(ev)
     disp:ExitLoop()
 end
 
-win.On[treeID].ItemDoubleClicked = setTimeline
+win.On[treeID].ItemDoubleClicked = navigateToItem
 win.On[findID].Clicked = onFind
 win.On[highlightID].Clicked = onHighlight
 win.On[colorID].CurrentIndexChanged = onColorChanged
